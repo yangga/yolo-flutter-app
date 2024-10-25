@@ -70,7 +70,7 @@ class MethodCallHandler: VideoCaptureDelegate, InferenceTimeListener, ResultsLis
   ) {
     predictor?.predict(
       sampleBuffer: sampleBuffer, onResultsListener: self, onInferenceTime: self, onFpsRate: self)
-      
+
     if shouldCaptureFrame {
       shouldCaptureFrame = false
 
@@ -81,7 +81,7 @@ class MethodCallHandler: VideoCaptureDelegate, InferenceTimeListener, ResultsLis
   private func captureFrameData(sampleBuffer: CMSampleBuffer) {
     guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
     else { return }
-      
+
     let ciImage = CIImage(cvImageBuffer: imageBuffer)
 
     let context = CIContext()
@@ -90,7 +90,7 @@ class MethodCallHandler: VideoCaptureDelegate, InferenceTimeListener, ResultsLis
 
     let uiImage = UIImage(cgImage: cgImage)
     self.capturedFrameData = uiImage.pngData()
-        
+
     self.capturedFrameSemaphore.signal()
   }
 
@@ -194,15 +194,18 @@ class MethodCallHandler: VideoCaptureDelegate, InferenceTimeListener, ResultsLis
 
   private func requestCameraCapture(args: [String: Any], result: @escaping FlutterResult) {
     let timeoutSec = args["timeoutSec"] as? Int ?? 3
-      
+
     shouldCaptureFrame = true
-      
+
     DispatchQueue.global(qos: .background).async {
-      let timeoutResult = self.capturedFrameSemaphore.wait(timeout: .now() + DispatchTimeInterval.seconds(timeoutSec))
+      let timeoutResult = self.capturedFrameSemaphore.wait(
+        timeout: .now() + DispatchTimeInterval.seconds(timeoutSec))
       if timeoutResult == .timedOut {
-        result(FlutterError(code: "TIMEOUT", message: "Timeout to capture the camera image", details: nil))
-          return
-        }
+        result(
+          FlutterError(
+            code: "TIMEOUT", message: "Timeout to capture the camera image", details: nil))
+        return
+      }
 
       let capturedCameraImage = self.capturedFrameData
       self.capturedFrameData = nil

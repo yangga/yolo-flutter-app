@@ -28,6 +28,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class CameraPreview {
@@ -41,14 +44,16 @@ public class CameraPreview {
     private boolean busy = false;
     private boolean shouldCaptureFrame = false;
     BlockingQueue<byte[]> capturedFrameQueue = new LinkedBlockingQueue<>();
+    private boolean deferredProcessing = false;
 
     public CameraPreview(Context context) {
         this.context = context;
     }
 
-    public void openCamera(int facing, Activity activity, PreviewView mPreviewView) {
+    public void openCamera(int facing, Activity activity, PreviewView mPreviewView, boolean deferredProcessing) {
         this.activity = activity;
         this.mPreviewView = mPreviewView;
+        this.deferredProcessing = deferredProcessing;
 
         final ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(context);
         cameraProviderFuture.addListener(() -> {
@@ -66,6 +71,8 @@ public class CameraPreview {
         if (!busy) {
             busy = true;
 
+            final boolean isMirrored = (facing == CameraSelector.LENS_FACING_FRONT);
+
             Preview cameraPreview = new Preview.Builder()
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .build();
@@ -76,26 +83,61 @@ public class CameraPreview {
 
             ImageAnalysis imageAnalysis =
                     new ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .setBackpressureStrategy(deferredProcessing ? ImageAnalysis.STRATEGY_BLOCK_PRODUCER : ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                             .build();
-            imageAnalysis.setAnalyzer(Runnable::run, imageProxy -> {
-                predictor.predict(imageProxy, facing == CameraSelector.LENS_FACING_FRONT);
 
-                if (shouldCaptureFrame) {
-                    shouldCaptureFrame = false;
+            if (deferredProcessing) {
+                final ExecutorService executorService = Executors.newSingleThreadExecutor();
+                final AtomicBoolean isPredicting = new AtomicBoolean(false);
 
-                    try {
-                        final byte[] data = toCapturedFrameData(imageProxy);
-                        capturedFrameQueue.put(data);
-                    } catch (InterruptedException ex) {
-                        ex.printStackTrace();
+                imageAnalysis.setAnalyzer(Runnable::run, imageProxy -> {
+                    if (isPredicting.get()) {
+                        imageProxy.close();
+                        return;
                     }
-                }
 
-                //clear stream for next image
-                imageProxy.close();
-            });
+                    isPredicting.set(true);
+
+                    executorService.submit(() -> {
+                        try {
+                            predictor.predict(imageProxy, isMirrored);
+
+                            if (shouldCaptureFrame) {
+                                shouldCaptureFrame = false;
+
+                                final byte[] data = toCapturedFrameData(imageProxy);
+                                capturedFrameQueue.put(data);
+                            }
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        } finally {
+                            //clear stream for next image
+                            imageProxy.close();
+
+                            isPredicting.set(false);
+                        }
+                    });
+                });
+            } else {
+                imageAnalysis.setAnalyzer(Runnable::run, imageProxy -> {
+                    predictor.predict(imageProxy, isMirrored);
+
+                    if (shouldCaptureFrame) {
+                        shouldCaptureFrame = false;
+
+                        try {
+                            final byte[] data = toCapturedFrameData(imageProxy);
+                            capturedFrameQueue.put(data);
+                        } catch (InterruptedException ex) {
+                            ex.printStackTrace();
+                        }
+                    }
+
+                    //clear stream for next image
+                    imageProxy.close();
+                });
+            }
 
             // Unbind use cases before rebinding
             cameraProvider.unbindAll();
